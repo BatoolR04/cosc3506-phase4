@@ -1,0 +1,59 @@
+name: Phase 3 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint
+        run: |
+          flake8 main.py
+
+      - name: Format Check
+        run: |
+          black --check main.py
+
+      - name: Run Tests
+        run: |
+          pytest tests --cov=main --cov-fail-under=80
+
+            - name: Start API
+        run: |
+          uvicorn main:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
+          sleep 5
+
+      - name: Integration test
+        run: |
+          python - <<'PY'
+          import requests
+
+          response = requests.get(
+              "http://127.0.0.1:8000/openapi.json",
+              timeout=10,
+          )
+          response.raise_for_status()
+
+          paths = response.json()["paths"]
+
+          assert "/api/v1/students/{student_id}/audit-report" in paths
+
+          print("Integration test passed")
+          PY

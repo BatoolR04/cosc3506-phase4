@@ -3,3 +3,9 @@ uvicorn
 python-multipart
 beautifulsoup4
 pydantic
+requests
+httpx
+pytest
+pytest-cov
+flake8
+black==24.4.2
