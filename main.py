@@ -7,6 +7,35 @@ import re
 app = FastAPI()
 
 students = {}
+catalog = {}
+
+def normalize_course_code(course_code: str) -> str:
+    return re.sub(r"[\s-]", "", course_code).upper()
+
+SEASON_ORDER = {
+    "W": 1,
+    "SP": 2,
+    "S": 3,
+    "F": 4
+}
+
+
+def parse_term(term):
+    term = term.upper().strip()
+
+    match = re.fullmatch(r"(\d{2})(SP|W|S|F)", term)
+
+    if not match:
+        return (999, 999)
+
+    year = int(match.group(1))
+    season = match.group(2)
+
+    return (year, SEASON_ORDER[season])
+
+
+def is_earlier(term1, term2):
+    return parse_term(term1) < parse_term(term2)
 
 class HistoryCourse(BaseModel):
     course_code: str
@@ -98,6 +127,73 @@ def parse_transcript(html):
 
     return final
 
+@app.post("/api/v1/admin/catalog/import")
+async def import_catalog(file: UploadFile = File(...)):
+    content = await file.read()
+    soup = BeautifulSoup(content, "html.parser")
+    table = soup.find("table")
+
+    if table is None:
+        raise HTTPException(status_code=400, detail="No table found")
+
+    rows = table.find_all("tr")
+    catalog.clear()
+
+    course_code_regex = re.compile(r"[A-Z]{4}[\s-]?\d{4}")
+
+    for row in rows[1:]:
+        cols = row.find_all("td")
+
+        if len(cols) < 5:
+            continue
+
+        course_code = cols[0].get_text(strip=True)
+        title = cols[1].get_text(strip=True)
+        credits_raw = cols[2].get_text(strip=True)
+        prerequisites_raw = cols[3].get_text(strip=True)
+        cross_listed_raw = cols[4].get_text(strip=True)
+
+        try:
+            credits = int(credits_raw)
+        except ValueError:
+            credits = 0
+
+        prerequisites = course_code_regex.findall(
+            prerequisites_raw.upper()
+        )
+
+        cross_listed = course_code_regex.findall(
+            cross_listed_raw.upper()
+        )
+
+        key = normalize_course_code(course_code)
+
+        catalog[key] = {
+            "course_code": course_code,
+            "title": title,
+            "credits": credits,
+            "prerequisites": prerequisites,
+            "cross_listed": cross_listed,
+        }
+
+    return {
+        "message": "Catalog imported",
+        "courses_loaded": len(catalog),
+    }
+
+
+@app.get("/api/v1/catalog/courses/{course_code}")
+def get_course(course_code: str):
+    key = normalize_course_code(course_code)
+
+    if key not in catalog:
+        raise HTTPException(
+            status_code=404,
+            detail="Course not found",
+        )
+
+    return catalog[key]
+
 @app.post("/api/v1/students/{student_id}/history/import", status_code=201)
 async def import_history(student_id: str, file: UploadFile = File(...)):
     content = await file.read()
@@ -159,4 +255,102 @@ def get_profile(student_id: str):
         "student_id": student_id,
         "history": students[student_id]["history"],
         "plan": students[student_id]["plan"]
+    }
+
+@app.get("/api/v1/students/{student_id}/audit-report")
+def audit_report(student_id: str, strict: bool = False):
+
+    if student_id not in students:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    history = students[student_id]["history"]
+    plan = students[student_id]["plan"]
+
+    completed_courses = {}
+
+    for course in history:
+        if course["status"] == "Completed":
+            code = normalize_course_code(course["course_code"])
+            completed_courses[code] = course["credits_earned"]
+
+    total_earned = sum(completed_courses.values())
+
+    total_planned = 0
+
+    for course in plan:
+        code = normalize_course_code(course["course_code"])
+
+        if code in catalog:
+            total_planned += catalog[code]["credits"]
+
+    total_remaining = max(
+        0,
+        120 - total_earned - total_planned
+    )
+
+    timeline_errors = {}
+
+    for planned_course in plan:
+        planned_code = normalize_course_code(
+            planned_course["course_code"]
+        )
+        planned_term = planned_course["term"]
+
+        if planned_code not in catalog:
+            continue
+
+        prerequisites = catalog[planned_code]["prerequisites"]
+
+        for prerequisite in prerequisites:
+            prerequisite_code = normalize_course_code(prerequisite)
+
+            prerequisite_completed_earlier = False
+
+            for history_course in history:
+                history_code = normalize_course_code(
+                    history_course["course_code"]
+                )
+
+                if (
+                    history_code == prerequisite_code
+                    and history_course["status"] == "Completed"
+                    and is_earlier(
+                        history_course["term"],
+                        planned_term
+                    )
+                ):
+                    prerequisite_completed_earlier = True
+                    break
+
+            if not prerequisite_completed_earlier:
+                if planned_term not in timeline_errors:
+                    timeline_errors[planned_term] = []
+
+                timeline_errors[planned_term].append({
+                    "course_code": planned_course["course_code"],
+                    "type": "MISSING_PREREQUISITE",
+                    "message": (
+                        f"Missing prerequisite: {prerequisite}"
+                    )
+                })
+    
+        timeline_validation = []
+
+    for term in sorted(timeline_errors, key=parse_term):
+        timeline_validation.append({
+            "term": term,
+            "errors": timeline_errors[term]
+        })
+
+
+    return {
+        "student_id": student_id,
+        "status": "ok",
+        "timeline_validation": timeline_validation,
+        "cross_list_violations": [],
+        "credit_summary": {
+            "total_earned": total_earned,
+            "total_planned": total_planned,
+            "total_remaining_for_graduation": total_remaining
+        }
     }
