@@ -11,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,17 +26,17 @@ jobs:
 
       - name: Lint
         run: |
-          flake8 main.py
+          flake8 main.py tests --max-line-length=100 --ignore=E203,W503
 
-      - name: Format Check
+      - name: Format check
         run: |
-          black --check main.py
+          black --check main.py tests
 
-      - name: Run Tests
+      - name: Run tests with coverage
         run: |
-          pytest tests --cov=main --cov-fail-under=80
+          pytest tests --cov=main --cov-report=term-missing --cov-fail-under=80
 
-            - name: Start API
+      - name: Start API
         run: |
           uvicorn main:app --host 0.0.0.0 --port 8000 > uvicorn.log 2>&1 &
           sleep 5
@@ -52,8 +53,8 @@ jobs:
           response.raise_for_status()
 
           paths = response.json()["paths"]
+          required_path = "/api/v1/students/{student_id}/audit-report"
 
-          assert "/api/v1/students/{student_id}/audit-report" in paths
-
+          assert required_path in paths
           print("Integration test passed")
           PY
