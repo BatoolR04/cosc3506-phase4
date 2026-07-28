@@ -16,11 +16,24 @@ import bcrypt
 import jwt
 import os
 import re
+import logging
 
 
-app = FastAPI()
+# ---------------------------------------------------------
+# Application setup
+# ---------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="COSC 3506 Phase 4 API",
+    version="4.0.0"
+)
 
 
+# This assignment currently uses in-memory storage.
+# The data will reset whenever Render restarts or redeploys.
 students = {}
 catalog = {}
 users = {}
@@ -36,10 +49,14 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = 60
 
 
-# auto_error=False lets the application return 401
+# auto_error=False allows us to return our own 401 response
 # when the Authorization header is missing.
 bearer_scheme = HTTPBearer(auto_error=False)
 
+
+# ---------------------------------------------------------
+# Password helpers
+# ---------------------------------------------------------
 
 def hash_password(password: str) -> str:
     hashed_password = bcrypt.hashpw(
@@ -50,12 +67,19 @@ def hash_password(password: str) -> str:
     return hashed_password.decode("utf-8")
 
 
-def verify_password(password: str, password_hash: str) -> bool:
+def verify_password(
+    password: str,
+    password_hash: str
+) -> bool:
     return bcrypt.checkpw(
         password.encode("utf-8"),
         password_hash.encode("utf-8")
     )
 
+
+# ---------------------------------------------------------
+# Admin account
+# ---------------------------------------------------------
 
 def seed_admin():
     if "admin" not in users:
@@ -64,18 +88,29 @@ def seed_admin():
             "role": "admin"
         }
 
+        logger.info("Default admin account created.")
+
 
 seed_admin()
 
 
-def create_access_token(username: str, role: str) -> str:
+# ---------------------------------------------------------
+# JWT helpers
+# ---------------------------------------------------------
+
+def create_access_token(
+    username: str,
+    role: str
+) -> str:
     now = datetime.now(timezone.utc)
 
     payload = {
         "sub": username,
         "role": role,
         "iat": now,
-        "exp": now + timedelta(minutes=JWT_EXPIRY_MINUTES)
+        "exp": now + timedelta(
+            minutes=JWT_EXPIRY_MINUTES
+        )
     }
 
     return jwt.encode(
@@ -86,31 +121,47 @@ def create_access_token(username: str, role: str) -> str:
 
 
 def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(
-        bearer_scheme
-    )
-):
+    credentials: Optional[
+        HTTPAuthorizationCredentials
+    ] = Depends(bearer_scheme)
+) -> dict:
     if credentials is None:
         raise HTTPException(
             status_code=401,
             detail="Unauthorized"
         )
 
-    token = credentials.credentials
-
     try:
         payload = jwt.decode(
-            token,
+            credentials.credentials,
             JWT_SECRET,
             algorithms=[JWT_ALGORITHM]
         )
 
-        return payload
+        username = payload.get("sub")
+        role = payload.get("role")
 
-    except jwt.PyJWTError:
+        if not username or not role:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authentication token"
+            )
+
+        return {
+            "username": str(username).strip(),
+            "role": str(role).strip().lower()
+        }
+
+    except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=401,
-            detail="Unauthorized"
+            detail="Token has expired"
+        )
+
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token"
         )
 
 
@@ -118,10 +169,10 @@ def require_owner_or_admin(
     student_id: str,
     current_user: dict
 ):
-    if (
-        current_user.get("sub") != student_id
-        and current_user.get("role") != "admin"
-    ):
+    username = current_user.get("username")
+    role = current_user.get("role")
+
+    if username != student_id and role != "admin":
         raise HTTPException(
             status_code=401,
             detail="Unauthorized"
@@ -129,12 +180,20 @@ def require_owner_or_admin(
 
 
 def require_admin(current_user: dict):
-    if current_user.get("role") != "admin":
+    role = str(
+        current_user.get("role", "")
+    ).strip().lower()
+
+    if role != "admin":
         raise HTTPException(
             status_code=403,
-            detail="Forbidden"
+            detail="Admin access required"
         )
 
+
+# ---------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------
 
 def check_rate_limit(user_id: str):
     now = datetime.now(timezone.utc)
@@ -157,7 +216,13 @@ def check_rate_limit(user_id: str):
     rate_limits[user_id].append(now)
 
 
-def normalize_course_code(course_code: str) -> str:
+# ---------------------------------------------------------
+# Course and term helpers
+# ---------------------------------------------------------
+
+def normalize_course_code(
+    course_code: str
+) -> str:
     return re.sub(
         r"[\s-]",
         "",
@@ -173,7 +238,7 @@ SEASON_ORDER = {
 }
 
 
-def parse_term(term):
+def parse_term(term: str):
     term = term.upper().strip()
 
     match = re.fullmatch(
@@ -182,20 +247,24 @@ def parse_term(term):
     )
 
     if not match:
-        return (999, 999)
+        return 999, 999
 
     year = int(match.group(1))
     season = match.group(2)
 
-    return (
-        year,
-        SEASON_ORDER[season]
-    )
+    return year, SEASON_ORDER[season]
 
 
-def is_earlier(term1, term2):
+def is_earlier(
+    term1: str,
+    term2: str
+) -> bool:
     return parse_term(term1) < parse_term(term2)
 
+
+# ---------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------
 
 class HistoryCourse(BaseModel):
     course_code: str
@@ -222,7 +291,11 @@ class AuthBody(BaseModel):
     password: str
 
 
-def grade_rank(grade):
+# ---------------------------------------------------------
+# Transcript parsing
+# ---------------------------------------------------------
+
+def grade_rank(grade: str) -> int:
     grade = grade.strip()
 
     if grade.isdigit():
@@ -234,7 +307,7 @@ def grade_rank(grade):
     return 1
 
 
-def parse_credits(value):
+def parse_credits(value: str) -> int:
     try:
         return int(value.strip())
 
@@ -264,13 +337,18 @@ def parse_transcript(html):
 
         headers = [
             cell.get_text(strip=True)
-            for cell in rows[0].find_all(["th", "td"])
+            for cell in rows[0].find_all(
+                ["th", "td"]
+            )
         ]
 
         if len(headers) < 6:
             continue
 
-        if headers[0] != "Status" or headers[1] != "Course":
+        if (
+            headers[0] != "Status"
+            or headers[1] != "Course"
+        ):
             continue
 
         for row in rows[1:]:
@@ -291,7 +369,7 @@ def parse_transcript(html):
             if status not in valid_statuses:
                 continue
 
-            if term == "":
+            if not term:
                 continue
 
             key = (
@@ -306,22 +384,27 @@ def parse_transcript(html):
                 "term": term,
                 "credits_earned": credits,
                 "status": status,
-                "_grade_rank": grade_rank(grade),
+                "_grade_rank": grade_rank(grade)
             }
 
             if current is None:
                 records[key] = new_record
 
-            elif new_record["_grade_rank"] > current["_grade_rank"]:
-                records[key] = new_record
-
             elif (
-                new_record["_grade_rank"] == current["_grade_rank"]
-                and credits > current["credits_earned"]
+                new_record["_grade_rank"]
+                > current["_grade_rank"]
             ):
                 records[key] = new_record
 
-    final = []
+            elif (
+                new_record["_grade_rank"]
+                == current["_grade_rank"]
+                and credits
+                > current["credits_earned"]
+            ):
+                records[key] = new_record
+
+    final_records = []
 
     for record in records.values():
         record.pop(
@@ -329,9 +412,43 @@ def parse_transcript(html):
             None
         )
 
-        final.append(record)
+        final_records.append(record)
 
-    return final
+    return final_records
+
+
+# ---------------------------------------------------------
+# Health and startup checks
+# ---------------------------------------------------------
+
+@app.on_event("startup")
+def startup_event():
+    logger.info(
+        "COSC 3506 Phase 4 API started successfully."
+    )
+
+    logger.info(
+        "Admin role currently stored as: %s",
+        users.get("admin", {}).get("role")
+    )
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "COSC 3506 Phase 4 API is running",
+        "version": "4.0.0"
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "students_loaded": len(students),
+        "catalog_courses_loaded": len(catalog),
+        "users_loaded": len(users)
+    }
 
 
 # ---------------------------------------------------------
@@ -345,6 +462,18 @@ def parse_transcript(html):
 def register(body: AuthBody):
     username = body.username.strip()
 
+    if not username:
+        raise HTTPException(
+            status_code=400,
+            detail="Username is required"
+        )
+
+    if not body.password:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is required"
+        )
+
     if username in users:
         raise HTTPException(
             status_code=409,
@@ -352,7 +481,9 @@ def register(body: AuthBody):
         )
 
     users[username] = {
-        "password_hash": hash_password(body.password),
+        "password_hash": hash_password(
+            body.password
+        ),
         "role": "student"
     }
 
@@ -399,9 +530,16 @@ def login(body: AuthBody):
 @app.post("/api/v1/admin/catalog/import")
 async def import_catalog(
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_admin(current_user)
+
+    logger.info(
+        "Catalog import requested by admin user: %s",
+        current_user["username"]
+    )
 
     content = await file.read()
 
@@ -432,11 +570,25 @@ async def import_catalog(
         if len(cols) < 5:
             continue
 
-        course_code = cols[0].get_text(strip=True)
-        title = cols[1].get_text(strip=True)
-        credits_raw = cols[2].get_text(strip=True)
-        prerequisites_raw = cols[3].get_text(strip=True)
-        cross_listed_raw = cols[4].get_text(strip=True)
+        course_code = cols[0].get_text(
+            strip=True
+        )
+
+        title = cols[1].get_text(
+            strip=True
+        )
+
+        credits_raw = cols[2].get_text(
+            strip=True
+        )
+
+        prerequisites_raw = cols[3].get_text(
+            strip=True
+        )
+
+        cross_listed_raw = cols[4].get_text(
+            strip=True
+        )
 
         try:
             credits = int(credits_raw)
@@ -452,30 +604,41 @@ async def import_catalog(
             cross_listed_raw.upper()
         )
 
-        key = normalize_course_code(course_code)
+        key = normalize_course_code(
+            course_code
+        )
 
         catalog[key] = {
             "course_code": course_code,
             "title": title,
             "credits": credits,
             "prerequisites": prerequisites,
-            "cross_listed": cross_listed,
+            "cross_listed": cross_listed
         }
+
+    logger.info(
+        "Catalog imported successfully. Courses loaded: %s",
+        len(catalog)
+    )
 
     return {
         "message": "Catalog imported",
-        "courses_loaded": len(catalog),
+        "courses_loaded": len(catalog)
     }
 
 
-@app.get("/api/v1/catalog/courses/{course_code}")
+@app.get(
+    "/api/v1/catalog/courses/{course_code}"
+)
 def get_course(course_code: str):
-    key = normalize_course_code(course_code)
+    key = normalize_course_code(
+        course_code
+    )
 
     if key not in catalog:
         raise HTTPException(
             status_code=404,
-            detail="Course not found",
+            detail="Course not found"
         )
 
     return catalog[key]
@@ -492,7 +655,9 @@ def get_course(course_code: str):
 async def import_history(
     student_id: str,
     file: UploadFile = File(...),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -502,9 +667,16 @@ async def import_history(
     content = await file.read()
     history = parse_transcript(content)
 
+    existing_plan = []
+
+    if student_id in students:
+        existing_plan = students[
+            student_id
+        ].get("plan", [])
+
     students[student_id] = {
         "history": history,
-        "plan": []
+        "plan": existing_plan
     }
 
     return {
@@ -513,11 +685,15 @@ async def import_history(
     }
 
 
-@app.put("/api/v1/students/{student_id}/history")
+@app.put(
+    "/api/v1/students/{student_id}/history"
+)
 def update_history(
     student_id: str,
     body: HistoryBody,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -537,14 +713,20 @@ def update_history(
 
     return {
         "status": "success",
-        "message": "Academic history updated successfully"
+        "message": (
+            "Academic history updated successfully"
+        )
     }
 
 
-@app.delete("/api/v1/students/{student_id}/history")
+@app.delete(
+    "/api/v1/students/{student_id}/history"
+)
 def delete_history(
     student_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -569,11 +751,15 @@ def delete_history(
 # Student plan
 # ---------------------------------------------------------
 
-@app.post("/api/v1/students/{student_id}/plan")
+@app.post(
+    "/api/v1/students/{student_id}/plan"
+)
 def create_plan(
     student_id: str,
     body: PlanBody,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -593,15 +779,21 @@ def create_plan(
 
     return {
         "status": "success",
-        "planned_courses_saved": len(body.planned_courses)
+        "planned_courses_saved": len(
+            body.planned_courses
+        )
     }
 
 
-@app.put("/api/v1/students/{student_id}/plan")
+@app.put(
+    "/api/v1/students/{student_id}/plan"
+)
 def update_plan(
     student_id: str,
     body: PlanBody,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -621,14 +813,20 @@ def update_plan(
 
     return {
         "status": "success",
-        "planned_courses_saved": len(body.planned_courses)
+        "planned_courses_saved": len(
+            body.planned_courses
+        )
     }
 
 
-@app.delete("/api/v1/students/{student_id}/plan")
+@app.delete(
+    "/api/v1/students/{student_id}/plan"
+)
 def delete_plan(
     student_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -649,10 +847,14 @@ def delete_plan(
     }
 
 
-@app.get("/api/v1/students/{student_id}/plan")
+@app.get(
+    "/api/v1/students/{student_id}/plan"
+)
 def get_plan(
     student_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -667,7 +869,9 @@ def get_plan(
 
     return {
         "student_id": student_id,
-        "planned_courses": students[student_id]["plan"]
+        "planned_courses": students[
+            student_id
+        ]["plan"]
     }
 
 
@@ -675,10 +879,14 @@ def get_plan(
 # Student profile
 # ---------------------------------------------------------
 
-@app.get("/api/v1/students/{student_id}/profile")
+@app.get(
+    "/api/v1/students/{student_id}/profile"
+)
 def get_profile(
     student_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -693,8 +901,12 @@ def get_profile(
 
     return {
         "student_id": student_id,
-        "history": students[student_id]["history"],
-        "plan": students[student_id]["plan"],
+        "history": students[
+            student_id
+        ]["history"],
+        "plan": students[
+            student_id
+        ]["plan"]
     }
 
 
@@ -702,11 +914,15 @@ def get_profile(
 # Audit report
 # ---------------------------------------------------------
 
-@app.get("/api/v1/students/{student_id}/audit-report")
+@app.get(
+    "/api/v1/students/{student_id}/audit-report"
+)
 def audit_report(
     student_id: str,
     strict: bool = False,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -719,12 +935,17 @@ def audit_report(
             detail="Student not found"
         )
 
-    # The first 10 requests succeed.
-    # Request 11 within 60 seconds returns 429.
-    check_rate_limit(current_user["sub"])
+    check_rate_limit(
+        current_user["username"]
+    )
 
-    history = students[student_id]["history"]
-    plan = students[student_id]["plan"]
+    history = students[
+        student_id
+    ]["history"]
+
+    plan = students[
+        student_id
+    ]["plan"]
 
     timeline_validation = []
     cross_list_violations = []
@@ -737,7 +958,9 @@ def audit_report(
                 course["course_code"]
             )
 
-            completed_courses[code] = course["credits_earned"]
+            completed_courses[code] = (
+                course["credits_earned"]
+            )
 
     total_earned = sum(
         completed_courses.values()
@@ -751,11 +974,15 @@ def audit_report(
         )
 
         if code in catalog:
-            total_planned += catalog[code]["credits"]
+            total_planned += catalog[
+                code
+            ]["credits"]
 
     total_remaining = max(
         0,
-        120 - total_earned - total_planned
+        120
+        - total_earned
+        - total_planned
     )
 
     timeline_errors = {}
@@ -770,23 +997,33 @@ def audit_report(
         if planned_code not in catalog:
             continue
 
-        prerequisites = catalog[planned_code]["prerequisites"]
+        prerequisites = catalog[
+            planned_code
+        ]["prerequisites"]
 
         for prerequisite in prerequisites:
-            prerequisite_code = normalize_course_code(
-                prerequisite
+            prerequisite_code = (
+                normalize_course_code(
+                    prerequisite
+                )
             )
 
             prerequisite_completed_earlier = False
 
             for history_course in history:
-                history_code = normalize_course_code(
-                    history_course["course_code"]
+                history_code = (
+                    normalize_course_code(
+                        history_course[
+                            "course_code"
+                        ]
+                    )
                 )
 
                 if (
-                    history_code == prerequisite_code
-                    and history_course["status"] == "Completed"
+                    history_code
+                    == prerequisite_code
+                    and history_course["status"]
+                    == "Completed"
                     and is_earlier(
                         history_course["term"],
                         planned_term
@@ -796,16 +1033,30 @@ def audit_report(
                     break
 
             if not prerequisite_completed_earlier:
-                if planned_term not in timeline_errors:
-                    timeline_errors[planned_term] = []
+                if (
+                    planned_term
+                    not in timeline_errors
+                ):
+                    timeline_errors[
+                        planned_term
+                    ] = []
 
-                timeline_errors[planned_term].append(
+                timeline_errors[
+                    planned_term
+                ].append(
                     {
-                        "course_code": planned_course["course_code"],
-                        "type": "MISSING_PREREQUISITE",
-                        "message": (
-                            f"Missing prerequisite: {prerequisite}"
+                        "course_code": (
+                            planned_course[
+                                "course_code"
+                            ]
                         ),
+                        "type": (
+                            "MISSING_PREREQUISITE"
+                        ),
+                        "message": (
+                            "Missing prerequisite: "
+                            f"{prerequisite}"
+                        )
                     }
                 )
 
@@ -816,21 +1067,32 @@ def audit_report(
         timeline_validation.append(
             {
                 "term": term,
-                "errors": timeline_errors[term]
+                "errors": timeline_errors[
+                    term
+                ]
             }
         )
 
     completed_course_codes = {}
 
     for history_course in history:
-        if history_course["status"] == "Completed":
-            normalized_code = normalize_course_code(
-                history_course["course_code"]
+        if (
+            history_course["status"]
+            == "Completed"
+        ):
+            normalized_code = (
+                normalize_course_code(
+                    history_course[
+                        "course_code"
+                    ]
+                )
             )
 
-            completed_course_codes[normalized_code] = (
-                history_course["course_code"]
-            )
+            completed_course_codes[
+                normalized_code
+            ] = history_course[
+                "course_code"
+            ]
 
     for planned_course in plan:
         planned_code = normalize_course_code(
@@ -844,24 +1106,40 @@ def audit_report(
             planned_code
         ]["cross_listed"]
 
-        for cross_listed_course in cross_listed_courses:
-            normalized_cross_listed = normalize_course_code(
-                cross_listed_course
+        for cross_listed_course in (
+            cross_listed_courses
+        ):
+            normalized_cross_listed = (
+                normalize_course_code(
+                    cross_listed_course
+                )
             )
 
-            if normalized_cross_listed in completed_course_codes:
-                completed_display_code = completed_course_codes[
-                    normalized_cross_listed
-                ]
+            if (
+                normalized_cross_listed
+                in completed_course_codes
+            ):
+                completed_display_code = (
+                    completed_course_codes[
+                        normalized_cross_listed
+                    ]
+                )
 
                 cross_list_violations.append(
                     {
-                        "course_code": planned_course["course_code"],
-                        "type": "CROSS_LIST_CONFLICT",
-                        "message": (
-                            "Cross-listed with completed course "
-                            f"{completed_display_code}"
+                        "course_code": (
+                            planned_course[
+                                "course_code"
+                            ]
                         ),
+                        "type": (
+                            "CROSS_LIST_CONFLICT"
+                        ),
+                        "message": (
+                            "Cross-listed with "
+                            "completed course "
+                            f"{completed_display_code}"
+                        )
                     }
                 )
 
@@ -871,21 +1149,31 @@ def audit_report(
     )
 
     if has_issues:
-        status = "failed" if strict else "warning"
+        status_value = (
+            "failed"
+            if strict
+            else "warning"
+        )
 
     else:
-        status = "ok"
+        status_value = "ok"
 
     return {
         "student_id": student_id,
-        "status": status,
-        "timeline_validation": timeline_validation,
-        "cross_list_violations": cross_list_violations,
+        "status": status_value,
+        "timeline_validation": (
+            timeline_validation
+        ),
+        "cross_list_violations": (
+            cross_list_violations
+        ),
         "credit_summary": {
             "total_earned": total_earned,
             "total_planned": total_planned,
-            "total_remaining_for_graduation": total_remaining,
-        },
+            "total_remaining_for_graduation": (
+                total_remaining
+            )
+        }
     }
 
 
@@ -893,10 +1181,14 @@ def audit_report(
 # Course recommendations
 # ---------------------------------------------------------
 
-@app.get("/api/v1/students/{student_id}/recommendations")
+@app.get(
+    "/api/v1/students/{student_id}/recommendations"
+)
 def get_recommendations(
     student_id: str,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(
+        get_current_user
+    )
 ):
     require_owner_or_admin(
         student_id,
@@ -909,7 +1201,9 @@ def get_recommendations(
             detail="Student not found"
         )
 
-    history = students[student_id]["history"]
+    history = students[
+        student_id
+    ]["history"]
 
     completed_courses = set()
 
@@ -924,48 +1218,66 @@ def get_recommendations(
     graph = {}
     indegree = {}
 
-    # Add only courses that have not been completed.
     for course_code in catalog:
-        normalized_course = normalize_course_code(
-            course_code
+        normalized_course = (
+            normalize_course_code(
+                course_code
+            )
         )
 
-        if normalized_course in completed_courses:
+        if (
+            normalized_course
+            in completed_courses
+        ):
             continue
 
         graph[normalized_course] = []
         indegree[normalized_course] = 0
 
-    # Create an edge:
-    # prerequisite -> course requiring that prerequisite.
-    for course_code, course in catalog.items():
-        normalized_course = normalize_course_code(
-            course_code
+    for course_code, course in (
+        catalog.items()
+    ):
+        normalized_course = (
+            normalize_course_code(
+                course_code
+            )
         )
 
-        if normalized_course in completed_courses:
+        if (
+            normalized_course
+            in completed_courses
+        ):
             continue
 
-        for prerequisite in course["prerequisites"]:
-            prerequisite_code = normalize_course_code(
-                prerequisite
+        for prerequisite in course[
+            "prerequisites"
+        ]:
+            prerequisite_code = (
+                normalize_course_code(
+                    prerequisite
+                )
             )
 
-            # Completed prerequisites are already satisfied.
-            if prerequisite_code in completed_courses:
+            if (
+                prerequisite_code
+                in completed_courses
+            ):
                 continue
 
             if (
                 prerequisite_code in graph
                 and normalized_course in graph
             ):
-                graph[prerequisite_code].append(
+                graph[
+                    prerequisite_code
+                ].append(
                     normalized_course
                 )
 
-                indegree[normalized_course] += 1
+                indegree[
+                    normalized_course
+                ] += 1
 
-    # Courses with no unfinished prerequisites can be taken first.
     queue = [
         course_code
         for course_code in indegree
@@ -975,31 +1287,48 @@ def get_recommendations(
     recommended_pathway = []
     term_number = 1
 
-    # Process one Kahn level at a time.
     while queue:
         current_term_courses = queue
         queue = []
 
-        for current_course in current_term_courses:
+        for current_course in (
+            current_term_courses
+        ):
             recommended_pathway.append(
                 {
-                    "course_code": catalog[
-                        current_course
-                    ]["course_code"],
+                    "course_code": (
+                        catalog[
+                            current_course
+                        ]["course_code"]
+                    ),
                     "term": term_number
                 }
             )
 
-        for current_course in current_term_courses:
-            for dependent_course in graph[current_course]:
-                indegree[dependent_course] -= 1
+        for current_course in (
+            current_term_courses
+        ):
+            for dependent_course in graph[
+                current_course
+            ]:
+                indegree[
+                    dependent_course
+                ] -= 1
 
-                if indegree[dependent_course] == 0:
-                    queue.append(dependent_course)
+                if (
+                    indegree[
+                        dependent_course
+                    ] == 0
+                ):
+                    queue.append(
+                        dependent_course
+                    )
 
         term_number += 1
 
     return {
         "student_id": student_id,
-        "recommended_pathway": recommended_pathway
+        "recommended_pathway": (
+            recommended_pathway
+        )
     }
