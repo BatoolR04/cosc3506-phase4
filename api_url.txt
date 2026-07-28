@@ -1,1 +1,1 @@
-https://phase2-student-api.onrender.com
+https://cosc3506-phase3.onrender.com
