@@ -1291,19 +1291,17 @@ def get_recommendations(
         current_term_courses = queue
         queue = []
 
-        for current_course in (
-            current_term_courses
-        ):
-            recommended_pathway.append(
-                {
-                    "course_code": (
-                        catalog[
-                            current_course
-                        ]["course_code"]
-                    ),
-                    "term": term_number
-                }
-            )
+        term_course_codes = [
+            catalog[current_course]["course_code"]
+            for current_course in current_term_courses
+        ]
+
+        recommended_pathway.append(
+            {
+                "term": f"Term {term_number}",
+                "courses": term_course_codes
+            }
+        )
 
         for current_course in (
             current_term_courses
