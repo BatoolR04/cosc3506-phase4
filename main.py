@@ -36,7 +36,7 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_MINUTES = 60
 
 
-# auto_error=False allows us to return 401 instead of FastAPI's default 403
+# auto_error=False lets the application return 401
 # when the Authorization header is missing.
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -111,6 +111,28 @@ def get_current_user(
         raise HTTPException(
             status_code=401,
             detail="Unauthorized"
+        )
+
+
+def require_owner_or_admin(
+    student_id: str,
+    current_user: dict
+):
+    if (
+        current_user.get("sub") != student_id
+        and current_user.get("role") != "admin"
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized"
+        )
+
+
+def require_admin(current_user: dict):
+    if current_user.get("role") != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Forbidden"
         )
 
 
@@ -376,8 +398,11 @@ def login(body: AuthBody):
 
 @app.post("/api/v1/admin/catalog/import")
 async def import_catalog(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_user)
 ):
+    require_admin(current_user)
+
     content = await file.read()
 
     soup = BeautifulSoup(
@@ -469,12 +494,10 @@ async def import_history(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    # BOLA protection: username must match student_id.
-    if current_user["sub"] != student_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
 
     content = await file.read()
     history = parse_transcript(content)
@@ -493,8 +516,14 @@ async def import_history(
 @app.put("/api/v1/students/{student_id}/history")
 def update_history(
     student_id: str,
-    body: HistoryBody
+    body: HistoryBody,
+    current_user: dict = Depends(get_current_user)
 ):
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
+
     if student_id not in students:
         raise HTTPException(
             status_code=404,
@@ -513,7 +542,15 @@ def update_history(
 
 
 @app.delete("/api/v1/students/{student_id}/history")
-def delete_history(student_id: str):
+def delete_history(
+    student_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
+
     if student_id not in students:
         raise HTTPException(
             status_code=404,
@@ -535,8 +572,14 @@ def delete_history(student_id: str):
 @app.post("/api/v1/students/{student_id}/plan")
 def create_plan(
     student_id: str,
-    body: PlanBody
+    body: PlanBody,
+    current_user: dict = Depends(get_current_user)
 ):
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
+
     if student_id not in students:
         raise HTTPException(
             status_code=404,
@@ -557,8 +600,14 @@ def create_plan(
 @app.put("/api/v1/students/{student_id}/plan")
 def update_plan(
     student_id: str,
-    body: PlanBody
+    body: PlanBody,
+    current_user: dict = Depends(get_current_user)
 ):
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
+
     if student_id not in students:
         raise HTTPException(
             status_code=404,
@@ -577,7 +626,15 @@ def update_plan(
 
 
 @app.delete("/api/v1/students/{student_id}/plan")
-def delete_plan(student_id: str):
+def delete_plan(
+    student_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
+
     if student_id not in students:
         raise HTTPException(
             status_code=404,
@@ -597,14 +654,10 @@ def get_plan(
     student_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    if (
-        current_user["sub"] != student_id
-        and current_user["role"] != "admin"
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
 
     if student_id not in students:
         raise HTTPException(
@@ -627,15 +680,10 @@ def get_profile(
     student_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    # The grader expects 401 for a different student's token.
-    if (
-        current_user["sub"] != student_id
-        and current_user["role"] != "admin"
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
 
     if student_id not in students:
         raise HTTPException(
@@ -660,14 +708,10 @@ def audit_report(
     strict: bool = False,
     current_user: dict = Depends(get_current_user)
 ):
-    if (
-        current_user["sub"] != student_id
-        and current_user["role"] != "admin"
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
 
     if student_id not in students:
         raise HTTPException(
@@ -854,14 +898,10 @@ def get_recommendations(
     student_id: str,
     current_user: dict = Depends(get_current_user)
 ):
-    if (
-        current_user["sub"] != student_id
-        and current_user["role"] != "admin"
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
+    require_owner_or_admin(
+        student_id,
+        current_user
+    )
 
     if student_id not in students:
         raise HTTPException(
