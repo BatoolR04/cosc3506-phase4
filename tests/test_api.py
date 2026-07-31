@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from main import app, catalog, students
+from main import app, catalog, students, users
 
 
 client = TestClient(app)
@@ -9,6 +9,66 @@ client = TestClient(app)
 def reset_data():
     catalog.clear()
     students.clear()
+
+    # Keep only the hardcoded admin account between tests.
+    admin_user = users.get("admin")
+    users.clear()
+
+    if admin_user is not None:
+        users["admin"] = admin_user
+
+
+def get_token(username="770001", password="password123"):
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
+
+    assert register_response.status_code in {201, 409}
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": username,
+            "password": password,
+        },
+    )
+
+    assert login_response.status_code == 200
+
+    return login_response.json()["access_token"]
+
+
+def auth_headers(username="770001", password="password123"):
+    token = get_token(
+        username=username,
+        password=password,
+    )
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
+
+
+def admin_headers():
+    response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "admin",
+            "password": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+
+    token = response.json()["access_token"]
+
+    return {
+        "Authorization": f"Bearer {token}",
+    }
 
 
 def test_catalog_import_and_lookup():
@@ -39,7 +99,13 @@ def test_catalog_import_and_lookup():
 
     response = client.post(
         "/api/v1/admin/catalog/import",
-        files={"file": ("catalog.html", html, "text/html")},
+        files={
+            "file": (
+                "catalog.html",
+                html,
+                "text/html",
+            )
+        },
     )
 
     assert response.status_code == 200
@@ -53,6 +119,8 @@ def test_catalog_import_and_lookup():
 
 def test_history_import_and_profile():
     reset_data()
+
+    headers = auth_headers("770001")
 
     transcript = """
     <html>
@@ -81,13 +149,23 @@ def test_history_import_and_profile():
 
     response = client.post(
         "/api/v1/students/770001/history/import",
-        files={"file": ("transcript.html", transcript, "text/html")},
+        headers=headers,
+        files={
+            "file": (
+                "transcript.html",
+                transcript,
+                "text/html",
+            )
+        },
     )
 
     assert response.status_code == 201
     assert response.json()["past_courses_imported"] == 1
 
-    response = client.get("/api/v1/students/770001/profile")
+    response = client.get(
+        "/api/v1/students/770001/profile",
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert response.json()["student_id"] == "770001"
@@ -96,6 +174,8 @@ def test_history_import_and_profile():
 
 def test_missing_prerequisite_and_strict_behavior():
     reset_data()
+
+    headers = auth_headers("770001")
 
     catalog.update(
         {
@@ -126,16 +206,23 @@ def test_missing_prerequisite_and_strict_behavior():
         ],
     }
 
-    response = client.get("/api/v1/students/770001/audit-report?strict=false")
+    response = client.get(
+        "/api/v1/students/770001/audit-report?strict=false",
+        headers=headers,
+    )
 
     assert response.status_code == 200
+
     body = response.json()
 
     assert body["status"] == "warning"
     assert body["timeline_validation"][0]["term"] == "20W"
     assert body["timeline_validation"][0]["errors"][0]["type"] == "MISSING_PREREQUISITE"
 
-    response = client.get("/api/v1/students/770001/audit-report?strict=true")
+    response = client.get(
+        "/api/v1/students/770001/audit-report?strict=true",
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
@@ -143,6 +230,8 @@ def test_missing_prerequisite_and_strict_behavior():
 
 def test_cross_list_conflict():
     reset_data()
+
+    headers = auth_headers("770001")
 
     catalog.update(
         {
@@ -180,9 +269,13 @@ def test_cross_list_conflict():
         ],
     }
 
-    response = client.get("/api/v1/students/770001/audit-report")
+    response = client.get(
+        "/api/v1/students/770001/audit-report",
+        headers=headers,
+    )
 
     assert response.status_code == 200
+
     body = response.json()
 
     assert body["status"] == "warning"
@@ -192,6 +285,8 @@ def test_cross_list_conflict():
 
 def test_retake_not_double_counted():
     reset_data()
+
+    headers = auth_headers("770001")
 
     students["770001"] = {
         "history": [
@@ -217,7 +312,10 @@ def test_retake_not_double_counted():
         "plan": [],
     }
 
-    response = client.get("/api/v1/students/770001/audit-report")
+    response = client.get(
+        "/api/v1/students/770001/audit-report",
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert response.json()["credit_summary"]["total_earned"] == 3
@@ -226,12 +324,16 @@ def test_retake_not_double_counted():
 def test_student_not_found():
     reset_data()
 
-    response = client.get("/api/v1/students/does-not-exist/audit-report")
+    response = client.get(
+        "/api/v1/students/does-not-exist/audit-report",
+        headers=admin_headers(),
+    )
 
     assert response.status_code == 404
 
-    def test_update_and_delete_history():
-        reset_data()
+
+def test_update_and_delete_history():
+    reset_data()
 
     students["770001"] = {
         "history": [],
