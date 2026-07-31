@@ -1134,4 +1134,3 @@ def get_recommendations(
         "student_id": student_id,
         "recommended_pathway": recommended_pathway,
     }
-    
