@@ -5,3 +5,9 @@ beautifulsoup4==4.15.0
 bcrypt==5.0.0
 PyJWT==2.13.0
 pydantic==2.13.4
+
+flake8==7.3.0
+black==24.4.2
+pytest==8.4.2
+pytest-cov==7.1.0
+httpx==0.28.1
